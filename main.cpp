@@ -8,54 +8,37 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/ExecutionEngine.h>
 
-// pointers and other types are complex and will be implemented later
-enum VariantType : uint8_t {
-	Void,
-	Char,
-	Short,
-	Int,
-	Long,
-	String // temporary (until complex types are implemented)
-};
+#include <Variant.h>
+#include <RawVariant.h>
+#include <PackedVariant.h>
 
-template<typename T>
-struct TypeToVariant { static constexpr VariantType value = TypeToVariant<std::remove_cv_t<T>>::value; };
-template<>
-struct TypeToVariant<char> { static constexpr VariantType value = Char; };
-template<>
-struct TypeToVariant<short> { static constexpr VariantType value = Short; };
-template<>
-struct TypeToVariant<int> { static constexpr VariantType value = Int; };
-template<>
-struct TypeToVariant<long> { static constexpr VariantType value = Long; };
-template<>
-struct TypeToVariant<const char*> { static constexpr VariantType value = String; };
+LLVMValueRef mkassert(LLVMModuleRef module) {
+	LLVMTypeRef tbool = LLVMInt1Type();
+	LLVMValueRef fn = LLVMAddFunction(module, "assert", LLVMFunctionType(LLVMVoidType(), &tbool, 1, 0));
 
-// wrapper
-// TODO: maybe add support for when self isnt a pointer
-// TODO: add optional runtime checks
-struct Variant {
-	LLVMValueRef self;
-	LLVMBuilderRef block;
+	LLVMBasicBlockRef entry = LLVMAppendBasicBlock(fn, "entry");
+	LLVMBuilderRef b = LLVMCreateBuilder();
+	LLVMPositionBuilderAtEnd(b, entry);
 
-	Variant(LLVMValueRef self, LLVMBuilderRef block) : self(self), block(block) {};
+	/*LLVMTypeRef fntyTrap = LLVMFunctionType(LLVMVoidType(), nullptr, 0, 0);
+	LLVMValueRef trap = LLVMGetNamedFunction(module, "abort");
+	if (!trap)
+		trap = LLVMAddFunction(module, "abort", fntyTrap);*/
 
-	// TODO: maybe use templates
-	LLVMValueRef asChar() { return LLVMBuildLoad(block, LLVMBuildBitCast(block, self, LLVMPointerType(LLVMInt8Type(), 0), ""), ""); }
-	LLVMValueRef asShort() { return LLVMBuildLoad(block, LLVMBuildBitCast(block, self, LLVMPointerType(LLVMInt16Type(), 0), ""), ""); }
-	LLVMValueRef asInt() { return LLVMBuildLoad(block, LLVMBuildBitCast(block, self, LLVMPointerType(LLVMInt32Type(), 0), ""), ""); }
-	LLVMValueRef asLong() { return LLVMBuildLoad(block, LLVMBuildBitCast(block, self, LLVMPointerType(LLVMInt64Type(), 0), ""), ""); }
-	LLVMValueRef asString() { return LLVMBuildLoad(block, LLVMBuildBitCast(block, self, LLVMPointerType(LLVMInt8Type(), 0), ""), ""); }
+	LLVMBasicBlockRef pass = LLVMAppendBasicBlock(fn, "pass");
+	LLVMBasicBlockRef fail = LLVMAppendBasicBlock(fn, "fail");
+	LLVMBuildCondBr(b, LLVMGetParam(fn, 0), pass, fail);
 
-	LLVMValueRef tt() { return LLVMBuildLoad(block, LLVMBuildStructGEP(block, self, 1, ""), ""); }
-	
-	template<typename T>
-	void store(LLVMValueRef value) {
-		static_assert(TypeToVariant<T>::value != VariantType::Void, "Can't convert to variant type");
-		LLVMBuildStore(block, LLVMConstInt(LLVMInt8Type(), TypeToVariant<T>::value, false), LLVMBuildStructGEP(block, self, 1, ""));
-		LLVMBuildStore(block, value, self);
-	}
-};
+	LLVMPositionBuilderAtEnd(b, fail);
+	//LLVMBuildCall2(b, fntyTrap, trap, nullptr, 0, "");
+	LLVMBuildUnreachable(b); // unreachable puts int3 iirc so for the demo we dont need to call abort
+
+	LLVMPositionBuilderAtEnd(b, pass);
+	LLVMBuildRetVoid(b);
+
+	LLVMDisposeBuilder(b);
+	return fn;
+}
 
 int main() {
 	LLVMInitializeNativeTarget();
@@ -63,57 +46,79 @@ int main() {
 
 	LLVMContextSetOpaquePointers(LLVMGetGlobalContext(), false); // top 10 worst features btw
 
+	static constexpr int blahblah = 0; // qol
+
 	LLVMModuleRef module = LLVMModuleCreateWithName("[module]");
-	{
-		LLVMTypeRef variant = LLVMStructCreateNamed(LLVMGetGlobalContext(), "variant");
+	LLVMTypeRef charp = LLVMPointerType(LLVMInt8Type(), 0);
+	LLVMValueRef fnprintf = LLVMAddFunction(module, "printf", LLVMFunctionType(LLVMVoidType(), &charp, 1, true));
 
-		//struct variant {
-		//	union {
-		//		char c;
-		//		short h;
-		//		int d;
-		//		long long ll;
-		//		char* s; // temporary (until complex types are implemented)
-		//	};
-		//	VariantType tt;
-		//};
-		LLVMTypeRef body[] = { LLVMInt64Type(), LLVMInt8Type() };
-		LLVMStructSetBody(variant, body, _countof(body), false);
+	LLVMValueRef fnmain = LLVMAddFunction(module, "main", LLVMFunctionType(LLVMInt32Type(), nullptr, 0, false));
+	LLVMBuilderRef block = LLVMCreateBuilder();
+	LLVMPositionBuilderAtEnd(block, LLVMAppendBasicBlock(fnmain, "entry"));
 
-		LLVMTypeRef charp = LLVMPointerType(LLVMInt8Type(), 0);
-		LLVMValueRef fnprintf = LLVMAddFunction(module, "printf", LLVMFunctionType(LLVMVoidType(), &charp, 1, true));
+	// Variant
+	if constexpr (blahblah == 0) {
+		Variant var(LLVMBuildAlloca(block, Variant::makeType(), "pvar"), block, mkassert(module));
 
-		LLVMValueRef fnmain = LLVMAddFunction(module, "main", LLVMFunctionType(LLVMInt32Type(), nullptr, 0, false));
-		LLVMBuilderRef block = LLVMCreateBuilder();
-		LLVMPositionBuilderAtEnd(block, LLVMAppendBasicBlock(fnmain, "entry"));
-
-		Variant var(LLVMBuildAlloca(block, variant, "varPtr"), block);
-
-		var.store<int>(LLVMConstInt(LLVMInt32Type(), 67, false));
-		
-		{
-			LLVMValueRef args[] = {
-				LLVMBuildGlobalString(block, "var as an integer is %d (tt = %d)\n", ""),
-				var.asInt(), LLVMBuildZExt(block, var.tt(), LLVMInt32Type(), "")
-			};
-			LLVMBuildCall(block, fnprintf, args, _countof(args), "");
-		}
+		LLVMValueRef args[3];
+		var.store<int>(LLVMConstInt(LLVMInt32Type(), 123, false));
+		args[0] = LLVMBuildGlobalString(block, "int var is %d (tt = %d)\n", "");
+		args[1] = var.load<int>();
+		args[2] = LLVMBuildZExt(block, var.tag(), LLVMInt32Type(), "");
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
 
 		var.store<const char*>(LLVMBuildGlobalString(block, "Hello, World!", ""));
-
-		{
-			LLVMValueRef args[] = {
-				LLVMBuildGlobalString(block, "var as a string is '%s' (tt = %d)\n", ""),
-				var.asString(), LLVMBuildZExt(block, var.tt(), LLVMInt32Type(), "")
-			};
-			LLVMBuildCall(block, fnprintf, args, _countof(args), "");
-		}
+		args[0] = LLVMBuildGlobalString(block, "char* var is %d (tt = %d)\n", "");
+		args[1] = var.load<char*>();
+		args[2] = LLVMBuildZExt(block, var.tag(), LLVMInt32Type(), "");
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
 
 		LLVMBuildRet(block, LLVMConstInt(LLVMInt32Type(), 0, false));
-
-		LLVMDisposeBuilder(block);
 	}
 
+	// RawVariant
+	else if constexpr (blahblah == 1) {
+		RawVariant var(LLVMBuildAlloca(block, RawVariant::makeType(), "pvar"), block);
+
+		LLVMValueRef args[2];
+		var.store<int>(LLVMConstInt(LLVMInt32Type(), 123, false));
+		args[0] = LLVMBuildGlobalString(block, "int var is %d\n", "");
+		args[1] = var.load<int>();
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
+
+		var.store<const char*>(LLVMBuildGlobalString(block, "Hello, World!", ""));
+		args[0] = LLVMBuildGlobalString(block, "char* var is '%s'\n", "");
+		args[1] = var.load<char*>();
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
+
+		args[0] = LLVMBuildGlobalString(block, "char* var as long is 0x%llx\n", "");
+		args[1] = var.load<long long>();
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
+
+		LLVMBuildRet(block, LLVMConstInt(LLVMInt32Type(), 0, false));
+	}
+
+	// PackedVariant
+	else if constexpr (blahblah == 2) {
+		PackedVariant var(LLVMBuildAlloca(block, PackedVariant::makeType(), "pvar"), block);
+
+		LLVMValueRef args[3];
+		var.store<int>(LLVMConstInt(LLVMInt32Type(), 123, false));
+		args[0] = LLVMBuildGlobalString(block, "int var is %d (tt = %d)\n", "");
+		args[1] = var.load<int>();
+		args[2] = LLVMBuildZExt(block, var.tag(), LLVMInt32Type(), "");
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
+
+		var.store<const char*>(LLVMBuildGlobalString(block, "Hello, World!", ""));
+		args[0] = LLVMBuildGlobalString(block, "char* var is '%s' (tt = %d)\n", "");
+		args[1] = var.load<char*>();
+		args[2] = LLVMBuildZExt(block, var.tag(), LLVMInt32Type(), "");
+		LLVMBuildCall(block, fnprintf, args, _countof(args), "");
+
+		LLVMBuildRet(block, LLVMConstInt(LLVMInt32Type(), 0, false));
+	}
+
+	LLVMDisposeBuilder(block);
 	LLVMDumpModule(module);
 	putchar('\n');
 
@@ -125,7 +130,8 @@ int main() {
 		return 1;
 	}
 
-	printf("\n\nmain returned: %d\n", ((int(*)())LLVMGetFunctionAddress(ee, "main"))());
+	((int(*)())LLVMGetFunctionAddress(ee, "main"))();
+	//printf("\n\nmain returned: %d\n", ((int(*)())LLVMGetFunctionAddress(ee, "main"))());
 
 	LLVMDisposeModule(module);
 	return 0;
